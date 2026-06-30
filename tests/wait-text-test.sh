@@ -12,13 +12,13 @@
 #
 # Exits 0 if every case passes, 1 otherwise.
 
-# Locate the script under test: tests/.. /wait-text.sh
+# Locate the script under test: tests/.. /wait-text
 TEST_DIR=$(dirname "$0")
 ROOT=$(cd "$TEST_DIR/.." 2>/dev/null && pwd) || ROOT=''
-WT="$ROOT/wait-text.sh"
-[ -f "$WT" ] || WT='./wait-text.sh'	# fallback: run from repo root
+WT="$ROOT/wait-text"
+[ -f "$WT" ] || WT='./wait-text'	# fallback: run from repo root
 if [ ! -f "$WT" ]; then
-	printf 'wait-text-test: cannot find wait-text.sh\n' >&2
+	printf 'wait-text-test: cannot find wait-text\n' >&2
 	exit 2
 fi
 
@@ -138,6 +138,62 @@ expect_code "-V -> 0" 0 $?
 
 sh "$WT" --version >/dev/null 2>&1
 expect_code "--version -> 0" 0 $?
+
+# --- tmux source (--tmux / -m) --------------------------------------------
+# These are guarded: basic arg checks run when tmux is installed; the bad-pane
+# and end-to-end match cases additionally need a reachable tmux server. The
+# suite passes cleanly (skips) where tmux is unavailable.
+
+if command -v tmux >/dev/null 2>&1; then
+	# Missing value (parse error - no server needed).
+	sh "$WT" --tmux </dev/null >/dev/null 2>&1
+	expect_code "--tmux without value -> 2" 2 $?
+
+	sh "$WT" -m </dev/null >/dev/null 2>&1
+	expect_code "-m without value -> 2" 2 $?
+
+	# Mutual exclusion (checked in validate before tmux is consulted).
+	sh "$WT" --tmux %1 --file a "pat" >/dev/null 2>&1
+	expect_code "--tmux + --file mutually exclusive -> 2" 2 $?
+
+	sh "$WT" -m %1 -c 'echo x' "pat" >/dev/null 2>&1
+	expect_code "-m + -c mutually exclusive -> 2" 2 $?
+
+	if tmux info >/dev/null 2>&1; then
+		# Slash in pane id (rejected in validate).
+		sh "$WT" --tmux ../x "pat" </dev/null >/dev/null 2>&1
+		expect_code "--tmux pane id with slash -> 2" 2 $?
+
+		# Non-existent pane.
+		sh "$WT" --tmux %999999 "pat" </dev/null >/dev/null 2>&1
+		expect_code "--tmux non-existent pane -> 2" 2 $?
+
+		# End-to-end match against a throwaway detached session.
+		SESS="wt_test_$$"
+		if tmux new-session -d -s "$SESS" 2>/dev/null; then
+			TPANE=$(tmux list-panes -s -t "$SESS" -F '#{pane_id}' | head -1)
+			sh "$WT" --tmux "$TPANE" -t 8 "WTTESTMARK" >/dev/null 2>&1 &
+			wtpid=$!
+			sleep 1
+			tmux send-keys -t "$TPANE" 'echo WTTESTMARK' Enter
+			wait "$wtpid" 2>/dev/null
+			expect_code "--tmux end-to-end match -> 0" 0 $?
+			tmux kill-session -t "$SESS" 2>/dev/null
+		fi
+	fi
+fi
+
+# No-tmux path: hide tmux from PATH (script runs via absolute /bin/sh, so it
+# doesn't need PATH; inside, `command -v tmux` fails). Skip if /bin/sh or the
+# empty staging dir can't be created.
+if [ -x /bin/sh ]; then
+	notmux_dir=$(mktemp -d "${TMPDIR:-/tmp}/wt-notmux.XXXXXX" 2>/dev/null) || notmux_dir=''
+	if [ -n "$notmux_dir" ]; then
+		env PATH="$notmux_dir" /bin/sh "$WT" --tmux %1 "x" </dev/null >/dev/null 2>&1
+		expect_code "--tmux when tmux absent from PATH -> 2" 2 $?
+		rmdir "$notmux_dir" 2>/dev/null
+	fi
+fi
 
 # --- summary ---------------------------------------------------------------
 printf -- '--------------------\n'

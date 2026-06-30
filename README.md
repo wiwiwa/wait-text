@@ -37,11 +37,16 @@ It pairs naturally with `make`, `docker logs`, CI steps, and shell pipelines.
 runtime to install.
 
 ```sh
-# 1. Get the script (from a release archive or your checkout)
-chmod +x wait-text.sh
+# Install straight from GitHub to somewhere on your PATH, e.g.:
+curl -fsSL https://raw.githubusercontent.com/wiwiwa/wait-text/master/wait-text \
+  -o ~/.local/bin/wait-text
+chmod +x ~/.local/bin/wait-text
+```
 
-# 2. Put it somewhere on your PATH, for example:
-mv wait-text.sh ~/.local/bin/wait-text
+Or, from a checkout / release archive:
+
+```sh
+cp wait-text ~/.local/bin/wait-text && chmod +x ~/.local/bin/wait-text
 ```
 
 Check it runs:
@@ -59,8 +64,8 @@ WSL, Git Bash, or MSYS2.
 ## Usage
 
 ```text
-wait-text [-r] [--file PATH | --command CMD] [--timeout SECONDS] [--regex] PATTERN
-wait-text [-r] [-f PATH | -c CMD] [-t SECONDS] [-e] PATTERN
+wait-text [-r] [--file PATH | --command CMD | --tmux PANE] [--timeout SECONDS] [--regex] PATTERN
+wait-text [-r] [-f PATH | -c CMD | -m PANE] [-t SECONDS] [-e] PATTERN
 wait-text --help
 wait-text --version
 ```
@@ -76,14 +81,15 @@ Most options have a short alias shown in parentheses.
 | `PATTERN` | The text to watch for (required). Plain text by default; a regex with `--regex` (`-e`). |
 | `--file PATH` (`-f`) | Watch `PATH` instead of standard input. Checks existing content, then follows new content. |
 | `--command CMD` (`-c`) | Run `CMD` and watch its standard output instead of standard input. |
+| `--tmux PANE` (`-m`) | Watch the tmux pane `PANE` (e.g. `%5` or `session:0.1`). Captures **new** output via `tmux pipe-pane`; the pane is restored when the tool exits. |
 | `--timeout N` (`-t`) | Give up after `N` seconds (default: 30). Must be greater than 0. |
 | `--regex` (`-e`) | Treat `PATTERN` as a regular expression. |
 | `-r` | **Repeat mode** — see below. |
 | `--help` (`-h`) | Show usage and exit. |
 | `--version` (`-V`) | Show version and exit. |
 
-`--file` and `--command` are mutually exclusive; if neither is given, standard
-input is watched.
+`--file`, `--command`, and `--tmux` are mutually exclusive; if none is given,
+standard input is watched.
 
 ---
 
@@ -153,6 +159,14 @@ wait-text --file deploy.log "Deployment complete"
 wait-text --command "./serve.sh" "Listening on"
 ```
 
+**Watch a tmux pane** (e.g. a server running in another window):
+```sh
+# %5 is tmux's unique pane id; `tmux list-panes -a` shows them.
+wait-text --tmux %5 "Listening on"
+# or equivalently:
+wait-text -m %5 "Listening on"
+```
+
 **Match a regex:**
 ```sh
 wait-text --regex 'listening on port [0-9]+' < server.log
@@ -177,6 +191,21 @@ pattern anywhere in the live byte stream — a trailing newline is not required.
   forever silently.
 - **Exit-code driven.** Standard output stays empty during normal operation,
   making the tool safe to chain.
+
+### tmux source (`--tmux` / `-m`)
+
+- **New output only.** Capture starts when `wait-text` attaches; output already
+  visible in the pane (scrollback/current screen) is not replayed. A pattern
+  already on screen is matched only if it appears again in subsequent output.
+- **Pane is restored on exit.** `wait-text` stops its own `tmux pipe-pane`
+  redirection when it finishes (match, timeout, interrupt). It does not restore
+  a redirection that was active before it started.
+- **SIGKILL leaves a pane piping.** An uncatchable `kill -9` can't run the
+  cleanup trap. Clear a leftover pipe manually:
+  ```sh
+  tmux pipe-pane -t %5        # no command = disable pipe-pane
+  rm -f /tmp/tmux.pane.%5.log
+  ```
 
 ---
 

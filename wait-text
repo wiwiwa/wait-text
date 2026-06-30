@@ -16,6 +16,7 @@ REGEX=0
 REPEAT=0
 FILE=''
 COMMAND=''
+TMUX_PANE=''
 PATTERN=''
 
 # Runtime state (globals)
@@ -23,12 +24,17 @@ FIFO=''
 MARKER=''
 PRODUCER=''
 WATCHDOG=''
+TMUX_LOG=''
 
 # shellcheck disable=SC2317
 # cleanup: reached via the EXIT/INT/TERM/HUP traps below.
 cleanup() {
 	disarm_watchdog
 	[ -n "$PRODUCER" ] && kill "$PRODUCER" 2>/dev/null
+	if [ -n "$TMUX_PANE" ]; then
+		tmux pipe-pane -t "$TMUX_PANE" 2>/dev/null
+		[ -n "$TMUX_LOG" ] && rm -f "$TMUX_LOG"
+	fi
 	[ -n "$FIFO" ] && rm -f "$FIFO"
 	[ -n "$MARKER" ] && rm -f "$MARKER"
 }
@@ -41,8 +47,8 @@ die_usage() {
 
 print_usage() {
 	cat <<EOF
-Usage: wait-text [-r] [--file PATH | --command CMD] [--timeout N] [--regex] PATTERN
-       wait-text [-r] [-f PATH | -c CMD] [-t N] [-e] PATTERN
+Usage: wait-text [-r] [--file PATH | --command CMD | --tmux PANE] [--timeout N] [--regex] PATTERN
+       wait-text [-r] [-f PATH | -c CMD | -m PANE] [-t N] [-e] PATTERN
        wait-text --help | --version
 
 Block until PATTERN appears in the input, then exit.
@@ -57,6 +63,8 @@ Options:
    -e, --regex            Treat PATTERN as a regular expression.
    -f, --file PATH        Watch PATH instead of standard input.
    -c, --command CMD      Run CMD and watch its standard output.
+   -m, --tmux PANE        Watch the tmux pane PANE (e.g. %5 or session:0.1).
+                          New pane output only; pane is restored on exit.
 
 Exit codes (default): 0 = found; 1 = not found/timeout; 2 = usage/runtime error.
 Exit codes (-r):      0 = quiet/source ended; 2 = usage/runtime error.
@@ -109,6 +117,15 @@ parse_args() {
 			COMMAND="${1#--command=}"
 			shift
 			;;
+		--tmux | -m)
+			[ $# -ge 2 ] || die_usage "--tmux requires a value"
+			TMUX_PANE="$2"
+			shift 2
+			;;
+		--tmux=*)
+			TMUX_PANE="${1#--tmux=}"
+			shift
+			;;
 		--)
 			shift
 			break
@@ -134,8 +151,19 @@ validate() {
 	'' | *[!0-9]*) die_usage "invalid --timeout: $TIMEOUT (must be a positive integer)" ;;
 	esac
 	[ "$TIMEOUT" -gt 0 ] || die_usage "--timeout must be greater than 0"
-	if [ -n "$FILE" ] && [ -n "$COMMAND" ]; then
-		die_usage "--file and --command are mutually exclusive"
+	# At most one source may be set.
+	if [ -n "$FILE" ]; then
+		[ -z "$COMMAND" ] && [ -z "$TMUX_PANE" ] || die_usage "--file, --command and --tmux are mutually exclusive"
+	elif [ -n "$COMMAND" ]; then
+		[ -z "$TMUX_PANE" ] || die_usage "--file, --command and --tmux are mutually exclusive"
+	fi
+	# tmux source validation
+	if [ -n "$TMUX_PANE" ]; then
+		command -v tmux >/dev/null 2>&1 || die_usage "tmux is required for --tmux"
+		case "$TMUX_PANE" in
+		*/*) die_usage "invalid --tmux pane: $TMUX_PANE" ;;
+		esac
+		tmux list-panes -t "$TMUX_PANE" >/dev/null 2>&1 || die_usage "invalid --tmux pane: $TMUX_PANE"
 	fi
 }
 
@@ -146,6 +174,35 @@ match_in() {
 	else
 		printf '%s' "$1" | grep -qF -- "$PATTERN"
 	fi
+}
+
+# setup_tmux_source: redirect the target tmux pane's output to a fresh temp log
+# and point FILE at it so the existing file-source pipeline takes over. Called
+# from main after the trap is armed; teardown is handled by cleanup().
+setup_tmux_source() {
+	TMUX_LOG="${TMPDIR:-/tmp}/tmux.pane.$TMUX_PANE.log"
+	# Stop any existing pipe-pane on the target so we start from a clean state.
+	tmux pipe-pane -t "$TMUX_PANE" 2>/dev/null
+	# Fresh log: drop any stale file, then ensure an empty readable file exists
+	# before tail attaches.
+	rm -f "$TMUX_LOG"
+	if ! : >"$TMUX_LOG"; then
+		printf 'wait-text: cannot create tmux log: %s\n' "$TMUX_LOG" >&2
+		exit "$EXIT_USAGE"
+	fi
+	# Capture forward-going pane output. Append to avoid truncate races with
+	# the reader. tmux expands '%' formats in the shell-command argument, so
+	# double every '%' in the path (e.g. pane id %5) to get a literal '%'.
+	# The command runs server-side (/bin/sh -c); the path is single-quoted,
+	# so it must not contain a single quote.
+	esc_log=$(printf '%s' "$TMUX_LOG" | sed 's/%/%%/g')
+	if ! tmux pipe-pane -t "$TMUX_PANE" "cat >> '$esc_log'" 2>/dev/null; then
+		printf 'wait-text: cannot capture tmux pane: %s\n' "$TMUX_PANE" >&2
+		rm -f "$TMUX_LOG"
+		exit "$EXIT_USAGE"
+	fi
+	# Reuse the file-source pipeline for watching.
+	FILE="$TMUX_LOG"
 }
 
 start_producer() {
@@ -270,6 +327,9 @@ main() {
 		exit "$EXIT_USAGE"
 	fi
 	trap 'cleanup' EXIT INT TERM HUP
+
+	# tmux source: redirect the pane to a temp log, then watch it as a file.
+	[ -n "$TMUX_PANE" ] && setup_tmux_source
 
 	# File source: must be readable; check pre-existing content for an instant hit.
 	if [ -n "$FILE" ]; then
