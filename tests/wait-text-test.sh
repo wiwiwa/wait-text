@@ -63,8 +63,12 @@ expect_code "missing PATTERN -> 2" 2 $?
 sh "$WT" --timeout abc "x" </dev/null >/dev/null 2>&1
 expect_code "--timeout non-integer -> 2" 2 $?
 
+sh "$WT" --timeout -1 "x" </dev/null >/dev/null 2>&1
+expect_code "--timeout negative -> 2" 2 $?
+
+# 0 is valid and means "wait forever"; here the empty source just ends -> exit 1.
 sh "$WT" --timeout 0 "x" </dev/null >/dev/null 2>&1
-expect_code "--timeout zero -> 2" 2 $?
+expect_code "--timeout 0 = wait forever, source ends -> 1" 1 $?
 
 sh "$WT" -x "x" </dev/null >/dev/null 2>&1
 expect_code "unknown option -x -> 2" 2 $?

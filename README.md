@@ -82,7 +82,7 @@ Most options have a short alias shown in parentheses.
 | `--file PATH` (`-f`) | Watch `PATH` instead of standard input. Checks existing content, then follows new content. |
 | `--command CMD` (`-c`) | Run `CMD` and watch its standard output instead of standard input. |
 | `--tmux PANE` (`-m`) | Watch the tmux pane `PANE` (e.g. `%5` or `session:0.1`). Captures **new** output via `tmux pipe-pane`; the pane is restored when the tool exits. |
-| `--timeout N` (`-t`) | Give up after `N` seconds (default: 30). Must be greater than 0. |
+| `--timeout N` (`-t`) | Cap the wait at `N` seconds. Default is to **wait forever** (no cap); `0` also means no timeout. Must be `>= 0`. |
 | `--regex` (`-e`) | Treat `PATTERN` as a regular expression. |
 | `-r` | **Repeat mode** — see below. |
 | `--help` (`-h`) | Show usage and exit. |
@@ -187,8 +187,9 @@ pattern anywhere in the live byte stream — a trailing newline is not required.
   streams of any size with constant memory.
 - **Raw matching.** Control/escape sequences are matched as-is; they are never
   stripped or normalized.
-- **Never hangs.** A finite timeout always applies, so the tool cannot block
-  forever silently.
+- **Bounded on demand.** By default the tool blocks until the pattern appears
+  or the source ends — it will wait as long as the source keeps going. Pass
+  `--timeout N` to cap the wait.
 - **Exit-code driven.** Standard output stays empty during normal operation,
   making the tool safe to chain.
 

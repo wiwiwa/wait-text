@@ -11,7 +11,7 @@ EXIT_NOTFOUND=1 # not found, timeout, or source ended without a match (base)
 EXIT_USAGE=2    # usage or runtime error
 
 # Options (defaults)
-TIMEOUT=30
+TIMEOUT=0
 REGEX=0
 REPEAT=0
 FILE=''
@@ -59,7 +59,8 @@ Options:
    -r                     Repeat mode: keep watching; reset the timer on each
                           match; exit 0 when the pattern stops appearing for
                           the timeout.
-   -t, --timeout N        Maximum seconds to wait (default 30). Must be > 0.
+   -t, --timeout N        Seconds to wait before giving up. Default: wait
+                          forever; 0 also means no timeout. Must be >= 0.
    -e, --regex            Treat PATTERN as a regular expression.
    -f, --file PATH        Watch PATH instead of standard input.
    -c, --command CMD      Run CMD and watch its standard output.
@@ -148,9 +149,8 @@ parse_args() {
 validate() {
 	[ -n "$PATTERN" ] || die_usage "missing PATTERN"
 	case "$TIMEOUT" in
-	'' | *[!0-9]*) die_usage "invalid --timeout: $TIMEOUT (must be a positive integer)" ;;
+	'' | *[!0-9]*) die_usage "invalid --timeout: $TIMEOUT (must be a non-negative integer; 0 = wait forever)" ;;
 	esac
-	[ "$TIMEOUT" -gt 0 ] || die_usage "--timeout must be greater than 0"
 	# At most one source may be set.
 	if [ -n "$FILE" ]; then
 		[ -z "$COMMAND" ] && [ -z "$TMUX_PANE" ] || die_usage "--file, --command and --tmux are mutually exclusive"
@@ -221,6 +221,9 @@ start_producer() {
 }
 
 start_watchdog() {
+	# 0 = wait forever: no watchdog. Also a no-op if called again from
+	# repeat mode when no timeout was requested.
+	[ "$TIMEOUT" -gt 0 ] || return 0
 	# After $TIMEOUT seconds: drop a marker and kill the producer so the reader
 	# sees EOF. Data-driven timeout (works under bash-as-sh without trapping the
 	# main shell). The TERM trap kills the sleep child on disarm so it does not
