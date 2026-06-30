@@ -60,6 +60,7 @@ WSL, Git Bash, or MSYS2.
 
 ```text
 wait-text [-r] [--file PATH | --command CMD] [--timeout SECONDS] [--regex] PATTERN
+wait-text [-r] [-f PATH | -c CMD] [-t SECONDS] [-e] PATTERN
 wait-text --help
 wait-text --version
 ```
@@ -68,16 +69,18 @@ wait-text --version
 
 ### Options
 
+Most options have a short alias shown in parentheses.
+
 | Option | Description |
 |--------|-------------|
-| `PATTERN` | The text to watch for (required). Plain text by default; a regex with `--regex`. |
-| `--file PATH` | Watch `PATH` instead of standard input. Checks existing content, then follows new content. |
-| `--command CMD` | Run `CMD` and watch its standard output instead of standard input. |
-| `--timeout N` | Give up after `N` seconds (default: 30). Must be greater than 0. |
-| `--regex` | Treat `PATTERN` as a regular expression. |
+| `PATTERN` | The text to watch for (required). Plain text by default; a regex with `--regex` (`-e`). |
+| `--file PATH` (`-f`) | Watch `PATH` instead of standard input. Checks existing content, then follows new content. |
+| `--command CMD` (`-c`) | Run `CMD` and watch its standard output instead of standard input. |
+| `--timeout N` (`-t`) | Give up after `N` seconds (default: 30). Must be greater than 0. |
+| `--regex` (`-e`) | Treat `PATTERN` as a regular expression. |
 | `-r` | **Repeat mode** — see below. |
-| `--help` | Show usage and exit. |
-| `--version` | Show version and exit. |
+| `--help` (`-h`) | Show usage and exit. |
+| `--version` (`-V`) | Show version and exit. |
 
 `--file` and `--command` are mutually exclusive; if neither is given, standard
 input is watched.
@@ -136,6 +139,8 @@ tail -f app.log | wait-text -r --timeout 5 "handling request" && take-snapshot.s
 **Timeout after 10 seconds:**
 ```sh
 wait-text --timeout 10 "ready" < slow.log || echo "timed out"
+# same thing with the short alias:
+wait-text -t 10 "ready" < slow.log || echo "timed out"
 ```
 
 **Watch a file for a marker (even if it appears later):**
