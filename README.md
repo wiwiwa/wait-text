@@ -82,6 +82,7 @@ Most options have a short alias shown in parentheses.
 | `--file PATH` (`-f`) | Watch `PATH` instead of standard input. Checks existing content, then follows new content. |
 | `--command CMD` (`-c`) | Run `CMD` and watch its standard output instead of standard input. |
 | `--tmux PANE` (`-m`) | Watch the tmux pane `PANE` (e.g. `%5` or `session:0.1`). Captures **new** output via `tmux pipe-pane`; the pane is restored when the tool exits. |
+| `--newline SEP` (`-n`) | (`--tmux` only) Translate `SEP` to newlines before matching, splitting the pane stream on a custom record boundary (e.g. `,`). |
 | `--timeout N` (`-t`) | Cap the wait at `N` seconds. Default is to **wait forever** (no cap); `0` also means no timeout. Must be `>= 0`. |
 | `--regex` (`-e`) | Treat `PATTERN` as a regular expression. |
 | `-r` | **Repeat mode** — see below. |
@@ -198,14 +199,14 @@ pattern anywhere in the live byte stream — a trailing newline is not required.
 - **New output only.** Capture starts when `wait-text` attaches; output already
   visible in the pane (scrollback/current screen) is not replayed. A pattern
   already on screen is matched only if it appears again in subsequent output.
-- **Pane is restored on exit.** `wait-text` stops its own `tmux pipe-pane`
-  redirection when it finishes (match, timeout, interrupt). It does not restore
-  a redirection that was active before it started.
-- **SIGKILL leaves a pane piping.** An uncatchable `kill -9` can't run the
-  cleanup trap. Clear a leftover pipe manually:
+- **Custom record separator (`-n`).** `--tmux` only: `-n SEP` splits the pane
+  stream on `SEP` (e.g. `,`) instead of on newlines.
+- **Pane is restored on exit.** `wait-text` detaches from the pane when it
+  finishes (match, timeout, or interrupt).
+- **SIGKILL caveat.** An uncatchable `kill -9` can't run cleanup. Detach the
+  pane manually:
   ```sh
-  tmux pipe-pane -t %5        # no command = disable pipe-pane
-  rm -f /tmp/tmux.pane.%5.log
+  tmux pipe-pane -t %5        # no command = detach
   ```
 
 ---

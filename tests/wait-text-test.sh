@@ -182,6 +182,31 @@ if command -v tmux >/dev/null 2>&1; then
 			tmux send-keys -t "$TPANE" 'echo WTTESTMARK' Enter
 			wait "$wtpid" 2>/dev/null
 			expect_code "--tmux end-to-end match -> 0" 0 $?
+
+			# -n separator: split a comma-joined record before matching.
+			sh "$WT" --tmux "$TPANE" -n ',' -t 8 "WTSEPMARK" >/dev/null 2>&1 &
+			wtpid=$!
+			sleep 1
+			tmux send-keys -t "$TPANE" 'printf "a,WTSEPMARK,b\n"' Enter
+			wait "$wtpid" 2>/dev/null
+			expect_code "--tmux -n separator match -> 0" 0 $?
+
+			# Pattern with a single quote (exercises the escape ordering).
+			sh "$WT" --tmux "$TPANE" -t 8 "WT'Q" >/dev/null 2>&1 &
+			wtpid=$!
+			sleep 1
+			tmux send-keys -t "$TPANE" "echo WT'Q" Enter
+			wait "$wtpid" 2>/dev/null
+			expect_code "--tmux pattern with single quote -> 0" 0 $?
+
+			# Pattern with a literal backslash.
+			sh "$WT" --tmux "$TPANE" -t 8 'WT\B' >/dev/null 2>&1 &
+			wtpid=$!
+			sleep 1
+			tmux send-keys -t "$TPANE" 'echo WT\B' Enter
+			wait "$wtpid" 2>/dev/null
+			expect_code "--tmux pattern with backslash -> 0" 0 $?
+
 			tmux kill-session -t "$SESS" 2>/dev/null
 		fi
 	fi

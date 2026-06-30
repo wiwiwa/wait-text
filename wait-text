@@ -17,6 +17,7 @@ REPEAT=0
 FILE=''
 COMMAND=''
 TMUX_PANE=''
+SEPARATOR=''
 PATTERN=''
 
 # Runtime state (globals)
@@ -24,7 +25,6 @@ FIFO=''
 MARKER=''
 PRODUCER=''
 WATCHDOG=''
-TMUX_LOG=''
 
 # shellcheck disable=SC2317
 # cleanup: reached via the EXIT/INT/TERM/HUP traps below.
@@ -32,8 +32,9 @@ cleanup() {
 	disarm_watchdog
 	[ -n "$PRODUCER" ] && kill "$PRODUCER" 2>/dev/null
 	if [ -n "$TMUX_PANE" ]; then
+		# Stop the pipe-pane redirection we started; the server-side grep/tr
+		# pipeline dies once the FIFO read end closes (SIGPIPE).
 		tmux pipe-pane -t "$TMUX_PANE" 2>/dev/null
-		[ -n "$TMUX_LOG" ] && rm -f "$TMUX_LOG"
 	fi
 	[ -n "$FIFO" ] && rm -f "$FIFO"
 	[ -n "$MARKER" ] && rm -f "$MARKER"
@@ -47,8 +48,8 @@ die_usage() {
 
 print_usage() {
 	cat <<EOF
-Usage: wait-text [-r] [--file PATH | --command CMD | --tmux PANE] [--timeout N] [--regex] PATTERN
-       wait-text [-r] [-f PATH | -c CMD | -m PANE] [-t N] [-e] PATTERN
+Usage: wait-text [-r] [--file PATH | --command CMD | --tmux PANE] [--timeout N] [--newline SEP] [--regex] PATTERN
+       wait-text [-r] [-f PATH | -c CMD | -m PANE] [-t N] [-n SEP] [-e] PATTERN
        wait-text --help | --version
 
 Block until PATTERN appears in the input, then exit.
@@ -66,6 +67,8 @@ Options:
    -c, --command CMD      Run CMD and watch its standard output.
    -m, --tmux PANE        Watch the tmux pane PANE (e.g. %5 or session:0.1).
                           New pane output only; pane is restored on exit.
+   -n, --newline SEP      (--tmux only) Translate SEP to newlines before
+                          matching; split the pane stream on a custom boundary.
 
 Exit codes (default): 0 = found; 1 = not found/timeout; 2 = usage/runtime error.
 Exit codes (-r):      0 = quiet/source ended; 2 = usage/runtime error.
@@ -127,6 +130,15 @@ parse_args() {
 			TMUX_PANE="${1#--tmux=}"
 			shift
 			;;
+		-n | --newline | --separator)
+			[ $# -ge 2 ] || die_usage "$1 requires a value"
+			SEPARATOR="$2"
+			shift 2
+			;;
+		--newline=* | --separator=*)
+			SEPARATOR="${1#*=}"
+			shift
+			;;
 		--)
 			shift
 			break
@@ -176,33 +188,92 @@ match_in() {
 	fi
 }
 
-# setup_tmux_source: redirect the target tmux pane's output to a fresh temp log
-# and point FILE at it so the existing file-source pipeline takes over. Called
-# from main after the trap is armed; teardown is handled by cleanup().
+# sq_escape: make a string safe to embed inside single quotes in a sh command.
+sq_escape() {
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
+# setup_tmux_source: attach a server-side awk process to the target pane that
+# writes each matching record directly to $FIFO (no temp log, no multi-stage
+# pipe). awk flushes on every match (fflush) and, in normal mode, exits after
+# the first match. Called from main once the FIFO + trap are in place; teardown
+# is handled by cleanup() (which stops the pipe-pane).
 setup_tmux_source() {
-	TMUX_LOG="${TMPDIR:-/tmp}/tmux.pane.$TMUX_PANE.log"
-	# Stop any existing pipe-pane on the target so we start from a clean state.
+	# Build the pattern value for awk -v and pick the matcher. Escape order
+	# matters: do all backslash/regex escaping FIRST, then single-quote escape.
+	if [ "$REGEX" -eq 1 ]; then
+		pat_val=$PATTERN
+		prog='$0 ~ pat { print; fflush(); if (rep == 0) exit }'
+	else
+		# index() matches literally; only double backslashes so awk's -v
+		# unescaping (\\ -> \) yields the original pattern.
+		pat_val=$(printf '%s' "$PATTERN" | sed 's/\\/\\\\/g')
+		prog='index($0, pat) { print; fflush(); if (rep == 0) exit }'
+	fi
+	esc_pattern=$(sq_escape "$pat_val")
+
+	# RS is a regex (single char = literal; multi-char or -e = dynamic regex).
+	# In literal mode, escape separator metachars so it matches literally.
+	rs_opt=''
+	if [ -n "$SEPARATOR" ]; then
+		if [ "$REGEX" -eq 1 ]; then
+			sep_val=$SEPARATOR
+		else
+			sep_val=$(printf '%s' "$SEPARATOR" | sed 's/[][\\.^$|(){}*+?]/\\&/g')
+		fi
+		rs_opt="-v RS='$(sq_escape "$sep_val")'"
+	fi
+
+	esc_fifo=$(sq_escape "$FIFO")
+	cmd="exec awk $rs_opt -v pat='$esc_pattern' -v rep='$REPEAT' '$prog' > '$esc_fifo'"
+
+	# Stop any prior pipe-pane so we start clean, then attach ours. As a final
+	# step, double every '%' so tmux's format expansion leaves the command intact.
 	tmux pipe-pane -t "$TMUX_PANE" 2>/dev/null
-	# Fresh log: drop any stale file, then ensure an empty readable file exists
-	# before tail attaches.
-	rm -f "$TMUX_LOG"
-	if ! : >"$TMUX_LOG"; then
-		printf 'wait-text: cannot create tmux log: %s\n' "$TMUX_LOG" >&2
-		exit "$EXIT_USAGE"
-	fi
-	# Capture forward-going pane output. Append to avoid truncate races with
-	# the reader. tmux expands '%' formats in the shell-command argument, so
-	# double every '%' in the path (e.g. pane id %5) to get a literal '%'.
-	# The command runs server-side (/bin/sh -c); the path is single-quoted,
-	# so it must not contain a single quote.
-	esc_log=$(printf '%s' "$TMUX_LOG" | sed 's/%/%%/g')
-	if ! tmux pipe-pane -t "$TMUX_PANE" "cat >> '$esc_log'" 2>/dev/null; then
+	esc_cmd=$(printf '%s' "$cmd" | sed 's/%/%%/g')
+	if ! tmux pipe-pane -t "$TMUX_PANE" "$esc_cmd" 2>/dev/null; then
 		printf 'wait-text: cannot capture tmux pane: %s\n' "$TMUX_PANE" >&2
-		rm -f "$TMUX_LOG"
 		exit "$EXIT_USAGE"
 	fi
-	# Reuse the file-source pipeline for watching.
-	FILE="$TMUX_LOG"
+}
+
+# watch_tmux_events: bash event loop for the tmux source. Matches are produced
+# by the server-side grep pipeline into $FIFO (our stdin); each line read IS a
+# match. Uses bash's `read -t` for native timeout: status >128 = timed out, 1 =
+# EOF (FIFO closed = pane/source ended, or `head -n 1` finished).
+watch_tmux_events() {
+	while true; do
+		if [ "$TIMEOUT" -gt 0 ]; then
+			read -r -t "$TIMEOUT" line
+			status=$?
+		else
+			read -r line
+			status=$?
+		fi
+		if [ "$status" -ne 0 ]; then
+			if [ "$TIMEOUT" -gt 0 ] && [ "$status" -gt 128 ]; then
+				if [ "$REPEAT" -eq 1 ]; then
+					printf 'wait-text: idle-timeout after %ss without a match\n' "$TIMEOUT" >&2
+					exit "$EXIT_FOUND"
+				else
+					printf 'wait-text: timeout after %ss without a match\n' "$TIMEOUT" >&2
+					exit "$EXIT_NOTFOUND"
+				fi
+			else
+				if [ "$REPEAT" -eq 1 ]; then
+					printf 'wait-text: source ended\n' >&2
+					exit "$EXIT_FOUND"
+				else
+					printf 'wait-text: source ended without a match\n' >&2
+					exit "$EXIT_NOTFOUND"
+				fi
+			fi
+		fi
+		# A line was read = a match. Repeat mode loops (read -t window resets);
+		# normal mode is done.
+		[ "$REPEAT" -eq 1 ] && continue
+		exit "$EXIT_FOUND"
+	done
 }
 
 start_producer() {
@@ -311,6 +382,20 @@ watch() {
 
 main() {
 	parse_args "$@"
+
+	# tmux source needs bash's `read -t` for native timeout. If the current
+	# shell lacks it, re-exec under bash (preserving all arguments).
+	if [ -n "$TMUX_PANE" ]; then
+		if ! ( echo | read -t 0 2>/dev/null ); then
+			if command -v bash >/dev/null 2>&1; then
+				exec bash "$0" "$@"
+			else
+				printf 'wait-text: bash is required for --tmux on this system\n' >&2
+				exit "$EXIT_USAGE"
+			fi
+		fi
+	fi
+
 	validate
 
 	# Temp fifo + timeout marker
@@ -331,8 +416,13 @@ main() {
 	fi
 	trap 'cleanup' EXIT INT TERM HUP
 
-	# tmux source: redirect the pane to a temp log, then watch it as a file.
-	[ -n "$TMUX_PANE" ] && setup_tmux_source
+	# tmux source: server-side grep pipeline writes matches to $FIFO; the
+	# event loop reads them with native `read -t`. No producer/watchdog.
+	if [ -n "$TMUX_PANE" ]; then
+		setup_tmux_source
+		watch_tmux_events <"$FIFO"
+		exit "$EXIT_NOTFOUND"	# unreachable; watch_tmux_events always exits
+	fi
 
 	# File source: must be readable; check pre-existing content for an instant hit.
 	if [ -n "$FILE" ]; then
