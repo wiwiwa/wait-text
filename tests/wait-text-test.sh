@@ -41,6 +41,28 @@ expect_code() {
 	fi
 }
 
+# expect_match <description> <extended-regex> <file>
+expect_match() {
+	if grep -qE -- "$2" "$3" 2>/dev/null; then
+		PASS=$((PASS + 1))
+		printf 'ok   - %s\n' "$1"
+	else
+		FAIL=$((FAIL + 1))
+		printf 'FAIL - %s (wanted /%s/ in %s: %s)\n' "$1" "$2" "$3" "$(cat "$3" 2>/dev/null)" >&2
+	fi
+}
+
+# expect_nomatch <description> <extended-regex> <file>
+expect_nomatch() {
+	if grep -qE -- "$2" "$3" 2>/dev/null; then
+		FAIL=$((FAIL + 1))
+		printf 'FAIL - %s (/%s/ unexpectedly in %s: %s)\n' "$1" "$2" "$3" "$(cat "$3" 2>/dev/null)" >&2
+	else
+		PASS=$((PASS + 1))
+		printf 'ok   - %s\n' "$1"
+	fi
+}
+
 # Silence the tool's diagnostics; functional tests check exit codes only.
 
 printf '== wait-text functional tests ==\n'
@@ -105,6 +127,19 @@ expect_code "plain text does not match regex-shaped pattern -> 1" 1 $?
 # Source contains the pattern then ends: match resets timer, EOF -> exit 0.
 printf 'beat\n' | sh "$WT" -r -t 1 "beat" >/dev/null 2>&1
 expect_code "-r: exits 0 when source ends -> 0" 0 $?
+
+# In -r mode the exit diagnostic reports how many matches were seen.
+# One match, then source ends.
+err="$WORK/r_one.err"
+printf 'a\n' | sh "$WT" -r -t 1 "a" 2>"$err" >/dev/null
+expect_code "-r stdin: one match then EOF -> 0" 0 $?
+expect_match "-r stdin: reports 'exit after 1 match'" "exit after 1 match" "$err"
+
+# Two matches with a gap (separate chunks), then source ends.
+err="$WORK/r_two.err"
+sh "$WT" -r -t 1 -c 'echo a; sleep 0.5; echo a' "a" 2>"$err" >/dev/null
+expect_code "-r stdin: two matches then EOF -> 0" 0 $?
+expect_match "-r stdin: reports 'exit after 2 matches'" "exit after 2 matches" "$err"
 
 # --- mutual exclusion ------------------------------------------------------
 sh "$WT" -f "$WORK/f.txt" -c 'echo y' "pat" >/dev/null 2>&1
@@ -206,6 +241,22 @@ if command -v tmux >/dev/null 2>&1; then
 			tmux send-keys -t "$TPANE" 'echo WT\B' Enter
 			wait "$wtpid" 2>/dev/null
 			expect_code "--tmux pattern with backslash -> 0" 0 $?
+
+			# Signal during a tmux watch must surface as an actionable error,
+			# NOT be misreported as an idle-timeout. A quiet pane + SIGTERM
+			# reproduces the "killed by external timeout" case.
+			err="$WORK/tmux_sig.err"
+			sh "$WT" --tmux "$TPANE" -r -t 8 "WTSIG" 2>"$err" >/dev/null &
+			wtpid=$!
+			sleep 1                          # let it attach and enter its read
+			kill -TERM "$wtpid"
+			wait "$wtpid" 2>/dev/null
+			expect_code "--tmux: SIGTERM -> exit 143" 143 $?
+			expect_nomatch "--tmux: SIGTERM not reported as idle-timeout" "idle-timeout" "$err"
+			expect_nomatch "--tmux: SIGTERM not reported as ordinary timeout" "without a match" "$err"
+			expect_match "--tmux: SIGTERM reported as signal error" "interrupted by signal 15 \(SIGTERM\)" "$err"
+			expect_match "--tmux: SIGTERM error includes retry hint" "increase the timeout" "$err"
+			expect_match "--tmux: -r match count surfaced on signal" "after [0-9]+ matches?" "$err"
 
 			tmux kill-session -t "$SESS" 2>/dev/null
 		fi

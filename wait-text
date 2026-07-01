@@ -25,6 +25,8 @@ FIFO=''
 MARKER=''
 PRODUCER=''
 WATCHDOG=''
+MATCHES=0
+SIGNAL=0
 
 # shellcheck disable=SC2317
 # cleanup: reached via the EXIT/INT/TERM/HUP traps below.
@@ -38,6 +40,57 @@ cleanup() {
 	fi
 	[ -n "$FIFO" ] && rm -f "$FIFO"
 	[ -n "$MARKER" ] && rm -f "$MARKER"
+}
+
+# caught_signal <signo>: installed for INT/TERM/HUP. Sets a flag so the watch
+# loops can distinguish a real external signal from a genuine `read -t` timeout
+# (both leave `read` with a status > 128). cleanup still runs via the EXIT trap.
+caught_signal() {
+	SIGNAL=$1
+}
+
+# sig_name <signo>: human-friendly name for the diagnostic.
+sig_name() {
+	case "$1" in
+	1) printf 'SIGHUP' ;;
+	2) printf 'SIGINT' ;;
+	15) printf 'SIGTERM' ;;
+	*) printf 'SIG%s' "$1" ;;
+	esac
+}
+
+# match_summary: in repeat mode, the running match-count clause (" after N
+# match(es)"); empty otherwise. Composed into both the normal exit line and the
+# signal-error line.
+match_summary() {
+	if [ "$REPEAT" -eq 1 ]; then
+		printf ' after %s match%s' "$MATCHES" "$([ "$MATCHES" -eq 1 ] || printf 'es')"
+	fi
+}
+
+# emit_reason <reason>: print the normal exit diagnostic. Repeat mode leads
+# with the match count; plain mode reports the bare reason.
+emit_reason() {
+	if [ "$REPEAT" -eq 1 ]; then
+		printf 'wait-text: exit%s (%s)\n' "$(match_summary)" "$1" >&2
+	else
+		printf 'wait-text: %s\n' "$1" >&2
+	fi
+}
+
+# emit_signal_error: a trapped signal is an actionable error for the caller
+# (typically an external timeout/interrupt), not a normal match/timeout exit.
+# Surfaces the signal and the match count so a caller (e.g. an LLM agent) can
+# recognise the kill and retry with a larger timeout.
+emit_signal_error() {
+	printf 'wait-text: interrupted by signal %s (%s)%s - external timeout or interrupt; increase the timeout and retry\n' \
+		"$SIGNAL" "$(sig_name "$SIGNAL")" "$(match_summary)" >&2
+}
+
+# signal_exit: emit the signal error and die with the conventional 128+sig.
+signal_exit() {
+	emit_signal_error
+	exit "$((128 + SIGNAL))"
 }
 
 die_usage() {
@@ -239,38 +292,45 @@ setup_tmux_source() {
 
 # watch_tmux_events: bash event loop for the tmux source. Matches are produced
 # by the server-side grep pipeline into $FIFO (our stdin); each line read IS a
-# match. Uses bash's `read -t` for native timeout: status >128 = timed out, 1 =
-# EOF (FIFO closed = pane/source ended, or `head -n 1` finished).
+# match. Uses bash's `read -t` for native timeout: a genuine timeout and a
+# trapped signal BOTH leave `read` with status > 128, so the trap-set $SIGNAL
+# flag is checked first to tell them apart.
 watch_tmux_events() {
 	while true; do
 		if [ "$TIMEOUT" -gt 0 ]; then
 			read -r -t "$TIMEOUT" line
-			status=$?
 		else
 			read -r line
-			status=$?
+		fi
+		status=$?
+		# Trapped INT/TERM/HUP during read -> actionable error, not a timeout.
+		if [ "$SIGNAL" -ne 0 ]; then
+			signal_exit
 		fi
 		if [ "$status" -ne 0 ]; then
 			if [ "$TIMEOUT" -gt 0 ] && [ "$status" -gt 128 ]; then
+				# Genuine `read -t` timeout (stream went quiet).
 				if [ "$REPEAT" -eq 1 ]; then
-					printf 'wait-text: idle-timeout after %ss without a match\n' "$TIMEOUT" >&2
+					emit_reason "idle-timeout after ${TIMEOUT}s"
 					exit "$EXIT_FOUND"
 				else
-					printf 'wait-text: timeout after %ss without a match\n' "$TIMEOUT" >&2
+					emit_reason "timeout after ${TIMEOUT}s without a match"
 					exit "$EXIT_NOTFOUND"
 				fi
 			else
+				# status 1 = EOF: FIFO closed = pane/source ended.
 				if [ "$REPEAT" -eq 1 ]; then
-					printf 'wait-text: source ended\n' >&2
+					emit_reason "source ended"
 					exit "$EXIT_FOUND"
 				else
-					printf 'wait-text: source ended without a match\n' >&2
+					emit_reason "source ended without a match"
 					exit "$EXIT_NOTFOUND"
 				fi
 			fi
 		fi
 		# A line was read = a match. Repeat mode loops (read -t window resets);
 		# normal mode is done.
+		MATCHES=$((MATCHES + 1))
 		[ "$REPEAT" -eq 1 ] && continue
 		exit "$EXIT_FOUND"
 	done
@@ -347,8 +407,13 @@ watch() {
 	[ "$keep" -lt 0 ] && keep=0
 	buffer=''
 	while read_chunk; do
+		# Trapped INT/TERM/HUP takes precedence over matching.
+		if [ "$SIGNAL" -ne 0 ]; then
+			signal_exit
+		fi
 		buffer=$buffer$chunk
 		if match_in "$buffer"; then
+			MATCHES=$((MATCHES + 1))
 			if [ "$REPEAT" -eq 1 ]; then
 				# consume matched bytes (keep tail), re-arm watchdog, continue
 				trim_buffer
@@ -360,21 +425,24 @@ watch() {
 		fi
 		trim_buffer
 	done
-	# EOF: distinguish timeout (marker set) from natural source end.
+	# EOF: a trapped signal beats the timeout/source-ended distinction.
+	if [ "$SIGNAL" -ne 0 ]; then
+		signal_exit
+	fi
 	if [ -e "$MARKER" ]; then
 		if [ "$REPEAT" -eq 1 ]; then
-			printf 'wait-text: idle-timeout after %ss without a match\n' "$TIMEOUT" >&2
+			emit_reason "idle-timeout after ${TIMEOUT}s"
 			exit "$EXIT_FOUND"
 		else
-			printf 'wait-text: timeout after %ss without a match\n' "$TIMEOUT" >&2
+			emit_reason "timeout after ${TIMEOUT}s without a match"
 			exit "$EXIT_NOTFOUND"
 		fi
 	else
 		if [ "$REPEAT" -eq 1 ]; then
-			printf 'wait-text: source ended\n' >&2
+			emit_reason "source ended"
 			exit "$EXIT_FOUND"
 		else
-			printf 'wait-text: source ended without a match\n' >&2
+			emit_reason "source ended without a match"
 			exit "$EXIT_NOTFOUND"
 		fi
 	fi
@@ -414,7 +482,10 @@ main() {
 		rm -f "$MARKER"
 		exit "$EXIT_USAGE"
 	fi
-	trap 'cleanup' EXIT INT TERM HUP
+	trap 'caught_signal 15' TERM
+	trap 'caught_signal 2' INT
+	trap 'caught_signal 1' HUP
+	trap 'cleanup' EXIT
 
 	# tmux source: server-side grep pipeline writes matches to $FIFO; the
 	# event loop reads them with native `read -t`. No producer/watchdog.

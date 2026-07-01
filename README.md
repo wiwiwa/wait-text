@@ -129,10 +129,29 @@ stop, or proceed once a service goes idle.
 | `0` | The text stopped appearing for the full timeout (quiet), or the source ended. |
 | `2` | Invalid usage or a runtime error. |
 
+In repeat mode the exit diagnostic reports **how many matches were seen**, e.g.
+`wait-text: exit after 12 matches (idle-timeout after 5s)` or
+`wait-text: exit after 12 matches (source ended)`.
+
 ```sh
 # Proceed once the server stops logging "handling request":
 tail -f app.log | wait-text -r --timeout 5 "handling request" && take-snapshot.sh
 ```
+
+### Signals (INT / TERM / HUP)
+
+A trapped signal is reported as an **error**, not a timeout, so callers (including
+LLM agents wrapping the tool with their own timeout) can tell the two apart and
+retry with a larger budget. `wait-text` exits with the conventional `128 + signo`
+and prints, e.g.:
+
+```
+wait-text: interrupted by signal 15 (SIGTERM) after 6122 matches - external timeout or interrupt; increase the timeout and retry
+```
+
+This matters under a watch wrapper: without it, a wrapper-delivered `SIGTERM`
+during `read` was indistinguishable from a genuine idle timeout and was misreported
+as one. (An uncatchable `kill -9` still can't run cleanup — see the tmux note.)
 
 ---
 
@@ -202,7 +221,7 @@ pattern anywhere in the live byte stream — a trailing newline is not required.
 - **Custom record separator (`-n`).** `--tmux` only: `-n SEP` splits the pane
   stream on `SEP` (e.g. `,`) instead of on newlines.
 - **Pane is restored on exit.** `wait-text` detaches from the pane when it
-  finishes (match, timeout, or interrupt).
+  finishes — match, timeout, source-end, or a trapped `INT`/`TERM`/`HUP`.
 - **SIGKILL caveat.** An uncatchable `kill -9` can't run cleanup. Detach the
   pane manually:
   ```sh
