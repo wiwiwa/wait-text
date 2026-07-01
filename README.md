@@ -153,6 +153,21 @@ This matters under a watch wrapper: without it, a wrapper-delivered `SIGTERM`
 during `read` was indistinguishable from a genuine idle timeout and was misreported
 as one. (An uncatchable `kill -9` still can't run cleanup — see the tmux note.)
 
+## For AI agents
+
+**The idea:** `wait-text` blocks until a pattern appears — in a stream, a file,
+or a tmux pane — then reports the result via its exit code. Use it as a
+"wait until X" primitive instead of polling or re-reading output in a loop. To
+wait for a background task, point it at the task's log file (or tmux pane) and
+let it block until the readiness/completion marker appears.
+
+**It is long-running by design.** It waits, often for a long time, and `-r`
+repeat mode doesn't exit until the stream goes quiet. If your runtime auto-kills
+long foreground commands, run `wait-text` as a background task or detached so it
+isn't SIGTERM'd mid-watch — otherwise it exits with
+`interrupted by signal … - increase the timeout and retry`. For a one-shot wait,
+prefer single-shot mode (no `-r`), which exits as soon as the marker appears.
+
 ---
 
 ## Examples
@@ -185,6 +200,13 @@ wait-text --command "./serve.sh" "Listening on"
 wait-text --tmux %5 "Listening on"
 # or equivalently:
 wait-text -m %5 "Listening on"
+```
+
+**Wait until a TUI agent (e.g. opencode) goes idle** — it redraws its spinner
+while busy, then falls silent; `-r` exits once the redraws stop (`-n '[' -e '^49;'`
+matches a spinner ANSI sequence):
+```sh
+wait-text --tmux %5 -r -t 3 -n '[' -e '^49;' && notify-send "opencode idle"
 ```
 
 **Match a regex:**
